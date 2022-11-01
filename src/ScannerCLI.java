@@ -2,7 +2,6 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.PrintStream;
 import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -56,6 +55,28 @@ public class ScannerCLI {
     private static final String ALGORITHM = "AES";
     private static final String TRANSFORMATION = "AES";
 
+    public static void progressPercentage(int remain, int total) throws Exception{
+        if (remain > total) {
+            throw new IllegalArgumentException();
+        }
+        int maxBareSize = 100; // 10unit for 100%
+        int remainProcent = ((10000 * remain) / total) / maxBareSize;
+        char defaultChar = '-';
+        String icon = "*";
+        String bare = new String(new char[maxBareSize]).replace('\0', defaultChar) + "]";
+        StringBuilder bareDone = new StringBuilder();
+        bareDone.append("[");
+        for (int i = 0; i < remainProcent; i++) {
+            bareDone.append(icon);
+        }
+        String bareRemain = bare.substring(remainProcent, bare.length());
+        System.out.print("\r" + bareDone + bareRemain + " " + remainProcent + "%");
+        if (remain == total) {
+            System.out.print("\n");
+        }
+    }
+
+
     // This function will try to get local network IPs of this machine
     public ArrayList<String> getMyIps() {
         ArrayList<String> ips = new ArrayList<String>();
@@ -87,7 +108,7 @@ public class ScannerCLI {
                 result rl = new result(port, false);
                 try {
                     Socket soc = new Socket();
-                    soc.connect(new InetSocketAddress(ip, port), 200); // timeout 2.0 sec
+                    soc.connect(new InetSocketAddress(ip, port), 2000); // timeout 2.0 sec
                     soc.close();
                     rl = new result(port, true);
                     return rl;
@@ -102,7 +123,8 @@ public class ScannerCLI {
     public HashMap<Integer, Boolean> checkPorts(String host, ArrayList<Integer> portsToScan) {
 
         HashMap<Integer, Boolean> ports = new HashMap<>();
-        final ExecutorService es = Executors.newFixedThreadPool(20); // run 20 threads.
+        int numberOfThreads = portsToScan!=null&&portsToScan.size()>0? 16: 128;
+        final ExecutorService es = Executors.newFixedThreadPool(numberOfThreads); // run threads.
         final List<Future<result>> futures = new ArrayList<>();
         
         if (portsToScan!=null&&portsToScan.size()>0){
@@ -110,14 +132,13 @@ public class ScannerCLI {
                 futures.add(portIsOpen(es, host, port.intValue()));
             }
         }else{
-            // if no speecific ports will scan for all ports [1-65535]
+            // if no specific ports will scan for all ports [1-65535]
             for(int i=1;i<=65535;i++){
                 futures.add(portIsOpen(es, host, i));
             }
         }
 
         es.shutdown();
-        // printing open ports .
         for (final Future<result> f : futures) {
             try {
                 if (f.get().giveStatus()) {
@@ -130,13 +151,12 @@ public class ScannerCLI {
         return ports;
     }
 
+    public static void nothing(String someValue){}
+
     // This function will take a subnet as input and scan all IPs for reachablilty [ with 2 seconds timeout ]
     public HashMap<String, Boolean> checkDevices(String subnet) {
         HashMap<String, Boolean> devices = new HashMap<String, Boolean>();
         try {
-            PrintStream original = System.out;
-            System.setOut(new PrintStream(new FileOutputStream("/dev/null")));
-
             IntStream.rangeClosed(1, 254).mapToObj(num -> subnet + num).parallel()
                     .filter((addr) -> {
                         try {
@@ -146,11 +166,10 @@ public class ScannerCLI {
                             }
                             return false;
                         } catch (IOException e) {
-                            devices.put(addr, new Boolean(false));
+                            //devices.put(addr, new Boolean(false));
                             return false;
                         }
-                    }).forEach(System.out::println);
-            System.setOut(original);
+                    }).forEach(ScannerCLI::nothing);
         } catch (Exception e) {}
         return devices;
     }
@@ -159,28 +178,67 @@ public class ScannerCLI {
     public HashMap<String,ArrayList<Integer>> scanSubnet(String subnet, ArrayList<Integer> portsToScan){
         HashMap<String,ArrayList<Integer>> subnetResults = new HashMap<>();
         // This will give us all network devices with this format {IP: -true/false- for connectivity}
-        System.out.println("Going to Scan This Subnet "+subnet);
-        HashMap<String, Boolean> subnetDevices = checkDevices(subnet);
-
-        System.out.println("Alive Hosts : "+subnetDevices);
-        // Will loop on the active devices to check targeted ports
-        subnetDevices.entrySet().forEach(entry -> {
-            if (entry.getValue()) {
-                ArrayList<Integer> openPorts = new ArrayList<>(); 
-                // This will give us all ports with this format {PORT: -tue/false- if open}
-                HashMap<Integer, Boolean> devicePorts = checkPorts(entry.getKey().toString(), portsToScan);
-                devicePorts.entrySet().forEach(port_entry -> {
-                    if (port_entry.getValue()) {
-                        openPorts.add(port_entry.getKey());
+        System.out.println("\nGoing to Scan This Subnet "+subnet);
+        try{
+            Thread t1 = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        for (int i = 0; i <= 100 && !Thread.currentThread().isInterrupted(); i++) {
+                            progressPercentage(i, 100);
+                            Thread.sleep(600);
+                        }
+                    } catch (Exception t1e) {
+                        try {
+                            progressPercentage(100, 100);
+                        } catch (Exception exx) {}
                     }
-                });
-                if(openPorts!=null&&openPorts.size()>0){
-                    System.out.println("Host "+entry.getKey()+" Has these openPorts "+openPorts);
-                    subnetResults.put(entry.getKey(), openPorts);
-                } 
-            }
-            
-        });
+                }
+            });  
+            t1.start();
+            HashMap<String, Boolean> subnetDevices = checkDevices(subnet);
+            t1.interrupt();
+        
+            System.out.println("\nAlive Hosts : "+subnetDevices);
+            // Will loop on the active devices to check targeted ports
+            subnetDevices.entrySet().forEach(entry -> {
+                if (entry.getValue()) {
+                    System.out.println("\nScanning Host -"+entry.getKey()+"- Ports");
+                    Thread t2 = new Thread(new Runnable() {
+                        @Override
+                        public void run() {
+                            try {
+                                for (int i = 0; i <= 100 && !Thread.currentThread().isInterrupted(); i++) {
+                                    progressPercentage(i, 100);
+                                    if (portsToScan!=null&&portsToScan.size()>0)
+                                        Thread.sleep(100);
+                                    else
+                                        Thread.sleep(13000);
+                                }
+                            } catch (Exception t2e) {
+                                try {
+                                    progressPercentage(100, 100);
+                                } catch (Exception exx) {}
+                            }
+                        }
+                    });  
+                    t2.start();
+                    ArrayList<Integer> openPorts = new ArrayList<>(); 
+                    // This will give us all ports with this format {PORT: -true/false- if open}
+                    HashMap<Integer, Boolean> devicePorts = checkPorts(entry.getKey().toString(), portsToScan);
+                    t2.interrupt();
+                    devicePorts.entrySet().forEach(port_entry -> {
+                        if (port_entry.getValue()) {
+                            openPorts.add(port_entry.getKey());
+                        }
+                    });
+                    if(openPorts!=null&&openPorts.size()>0){
+                        System.out.println("\nHost "+entry.getKey()+" Has these openPorts "+openPorts);
+                        subnetResults.put(entry.getKey(), openPorts);
+                    }                    
+                }
+            });
+        }catch(Exception ex){}
         return subnetResults;
     }
 
@@ -221,12 +279,17 @@ public class ScannerCLI {
         return true;
     }
 
-    public ScannerCLI(String appName, String subnet, ArrayList<Integer> ports, boolean encrypt, String keyString) {
+    public ScannerCLI(String appName, ArrayList<String> subnets, ArrayList<Integer> ports, boolean encrypt, String keyString) {
         HashMap<String,ArrayList<Integer>> scanResult = null;
-        if (subnet!=null&&subnet.length()>0){
+        if (subnets!=null&&subnets.size()>0){
             // dump the result from the object to JSON file
-            scanResult = scanSubnet(subnet, ports);
-            System.out.println("Final Result of the Subnet "+scanResult);
+            for (String subnet : subnets) {
+                if(scanResult==null)
+                    scanResult = scanSubnet(subnet, ports);
+                else
+                    scanResult.putAll(scanSubnet(subnet, ports));
+                //System.out.println("Final Result of the Subnet ["+subnet+"]"+scanResult);
+            }
             dumpResultsToFile(scanResult, encrypt, keyString);
         }else{
             // if we are here that means the user didn't enter a subnet -> we will scan whatever we can
@@ -237,9 +300,13 @@ public class ScannerCLI {
                 mySubnets.add(ip.substring(0, ip.lastIndexOf(".")) + ".");
             }
             for (String isubnet : mySubnets) {
-                scanResult = (scanSubnet(isubnet, ports));
-                dumpResultsToFile(scanResult, encrypt, keyString);
+                if(scanResult==null)
+                    scanResult = scanSubnet(isubnet, ports);
+                else
+                    scanResult.putAll(scanSubnet(isubnet, ports));
+                //System.out.println("Final Result of the Subnet ["+isubnet+"]"+scanResult);
             }
+            dumpResultsToFile(scanResult, encrypt, keyString);
         }
 
     }
@@ -316,7 +383,7 @@ public class ScannerCLI {
             Scanner sc = new Scanner(System.in);
 
             /* Variables Declarations */
-            String subnet = "";
+            ArrayList<String> subnets = new ArrayList<>();
             ArrayList<Integer> portsToScan = new ArrayList<>();
             String inputFilePath = "";
             String outputFilePath = "";
@@ -324,7 +391,7 @@ public class ScannerCLI {
 
             /* User Interaction */
             System.out.println("Welcome to Network Scanner CLI");
-            System.out.println("a. Scan Network Subnet");
+            System.out.println("a. Scan Network Subnets");
             System.out.println("b. Encrypt a result file");
             System.out.println("c. Decrypt a result file");
             System.out.print("Please Select an action to perform [a,b,c]: ");
@@ -332,37 +399,63 @@ public class ScannerCLI {
             switch(choice){
                 case 'a':
                     System.out.print("Would you like to provide details "+
-                        "or let the application scan your local network with all ports [true/false]: ");
-                    boolean askForInputs = sc.nextBoolean();
+                        "or let the application scan your local network with all ports [y/n]: ");
+                    String enterDetails = "";
+                    do{
+                        if(enterDetails.length()>0)
+                            System.out.println("Please Enter either y or n");
+                        enterDetails = sc.next();
+                    }while(!(enterDetails.equalsIgnoreCase("y") || enterDetails.equalsIgnoreCase("n")));
+                    boolean askForInputs = enterDetails.equalsIgnoreCase("y");
                     if(askForInputs){
                         Boolean specificPorts = false;
-                        System.out.print("Enter the Subnet you want to scan [fmt:{X.X.X.}]: ");
-                        subnet = sc.next();
-                        // 6 that is the minimum length for the format
-                        if(subnet!=null && subnet.length()>6 && isValidIPAddressWithoutLastOctect(subnet)){ 
-                            System.out.print("Do you wish to specify ports or scan all of them [true/false]: ");
-                            specificPorts = sc.nextBoolean();
-                            if(specificPorts){
-                                System.out.println("Keep entering ports to stop enter -1");
-                                int port = 0;
-                                do{
-                                    port = sc.nextInt();
-                                    if(port!=-1)
-                                        portsToScan.add(port);
-                                }while(port!=-1);
+                        System.out.println("Keep entering subnets to stop enter -1");
+                        String subnet = "";
+                        do{
+                            System.out.print("Enter the Subnet you want to scan [fmt:{X.X.X.}]: ");
+                            subnet = sc.next();
+                            // 6 that is the minimum length for the format
+                            if(subnet!=null && subnet.length()>=6 && isValidIPAddressWithoutLastOctect(subnet)){ 
+                                subnets.add(subnet);
+                            }else if (!subnet.equalsIgnoreCase("-1")){
+                                System.err.println("Invalid Subnet format");
+                                System.exit(-1);
                             }
-                        }else{
-                            System.err.println("Invalid Subnet format");
-                            System.exit(-1);
+                        }while(!subnet.equalsIgnoreCase("-1"));
+
+                        System.out.print("Do you wish to specify ports or scan all of them [y/n]: ");
+                        enterDetails = "";
+                        do{
+                            if(enterDetails.length()>0)
+                                System.out.println("Please Enter either y or n");
+                            enterDetails = sc.next();
+                        }while(!(enterDetails.equalsIgnoreCase("y") || enterDetails.equalsIgnoreCase("n")));
+
+                        specificPorts = enterDetails.equalsIgnoreCase("y");
+                        if(specificPorts){
+                            System.out.println("Keep entering ports to stop enter -1");
+                            int port = 0;
+                            do{
+                                port = sc.nextInt();
+                                if(port!=-1)
+                                    portsToScan.add(port);
+                            }while(port!=-1);
                         }
                     }
-                    System.out.print("Do you wish to encrypt the results file [true/false]: ");
-                    boolean encrypt = sc.nextBoolean();
+                    System.out.print("Do you wish to encrypt the results file [y/n]: ");
+                    enterDetails = "";
+                    do{
+                        if(enterDetails.length()>0)
+                            System.out.println("Please Enter either y or n");
+                        enterDetails = sc.next();
+                    }while(!(enterDetails.equalsIgnoreCase("y") || enterDetails.equalsIgnoreCase("n")));
+
+                    boolean encrypt = enterDetails.equalsIgnoreCase("y");
                     if(encrypt){
                         System.out.print("Enter the encryption key to encrypt the file with [24 characters or more]: ");
                         keyString = sc.next();
                     }
-                    new ScannerCLI("Scanner", subnet, portsToScan, encrypt, keyString);
+                    new ScannerCLI("Scanner", subnets, portsToScan, encrypt, keyString);
                     break;
                 case 'b':
                     System.out.print("Enter the file location you want to encrypt: ");
